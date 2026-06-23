@@ -8,15 +8,19 @@ A production-style **Node.js + Express + PostgreSQL + Socket.IO** backend for a 
 
 1. [Project Overview](#project-overview)
 2. [Tech Stack](#tech-stack)
-3. [Project Structure](#project-structure)
-4. [Environment Variables](#environment-variables)
-5. [Docker Setup (PostgreSQL)](#docker-setup-postgresql)
-6. [Database Schema](#database-schema)
-7. [How to Run Locally](#how-to-run-locally)
-8. [API Documentation](#api-documentation)
-9. [Socket.IO Events](#socketio-events)
-10. [Business Rules & Game Flow](#business-rules--game-flow)
-11. [Assumptions](#assumptions)
+3. [Architecture Diagram](#architecture-diagram)
+4. [Project Structure](#project-structure)
+5. [Environment Variables](#environment-variables)
+6. [Docker Setup (Docker Compose)](#docker-setup-docker-compose)
+7. [Database Schema](#database-schema)
+8. [How to Run Locally](#how-to-run-locally)
+9. [API Documentation](#api-documentation)
+10. [Socket.IO Events](#socketio-events)
+11. [Business Rules & Game Flow](#business-rules--game-flow)
+12. [Test Cases](#test-cases)
+13. [Edge Cases Handled](#edge-cases-handled)
+14. [Performance Considerations](#performance-considerations)
+15. [Assumptions](#assumptions)
 
 ---
 
@@ -39,10 +43,28 @@ The Spin Wheel Multiplayer Game System lets players join a shared spin-wheel ses
 
 ---
 
+## Architecture Diagram
+
+```
+Client (Postman / Frontend)
+          |
+          v
+Node.js + Express API
+          |
+          v
+Business Logic Layer (wheelService.js)
+          |
+          v
+PostgreSQL Database <---> Socket.IO Events
+```
+
+---
+
 ## Project Structure
 
 ```
 spin-wheel-game/
+├── docker-compose.yml         # Multi-container setup for database
 ├── server.js                  # Entry point – boots HTTP + Socket.IO server
 ├── package.json
 ├── .env.example               # Template for environment variables
@@ -92,9 +114,27 @@ cp .env.example .env
 
 ---
 
-## Docker Setup (PostgreSQL)
+## Docker Setup (Docker Compose)
 
-Run a PostgreSQL container with the required credentials:
+The easiest way to set up the database container is using **Docker Compose**.
+
+### Start Database
+
+```bash
+docker compose up -d
+```
+
+### Stop Database
+
+```bash
+docker compose down
+```
+
+---
+
+### Alternative Docker Run (Manual Setup)
+
+If you prefer manual command-line setup, run the following PostgreSQL container with the required credentials:
 
 ```bash
 docker run --name postgres-db \
@@ -105,7 +145,7 @@ docker run --name postgres-db \
   -d postgres
 ```
 
-> **Windows (PowerShell)** — replace `\` with `` ` ``:
+> **Windows (PowerShell) Alternative**:
 > ```powershell
 > docker run --name postgres-db `
 >   -e POSTGRES_USER=admin `
@@ -177,14 +217,10 @@ docker run --name postgres-db \
 - Node.js ≥ 18
 - Docker Desktop
 
-### Step 1 – Start PostgreSQL
+### Step 1 – Start Database
 
 ```bash
-docker run --name postgres-db \
-  -e POSTGRES_USER=admin \
-  -e POSTGRES_PASSWORD=admin123 \
-  -e POSTGRES_DB=spinwheel \
-  -p 5432:5432 -d postgres
+docker compose up -d
 ```
 
 ### Step 2 – Initialise the Database
@@ -413,6 +449,61 @@ Admin creates wheel
    admin_pool  ──► admin's wallet
    status = 'completed'
 ```
+
+---
+
+## Test Cases
+
+The following essential test scenarios verify the system's compliance with functional specifications.
+
+### 1. Create Wheel
+- **Input**: `POST /api/wheel/create` with `{ "admin_id": 1 }` (assuming user 1 is an admin).
+- **Expected Result**: HTTP `201 Created` with the spin wheel database record in `waiting` status, pools initialized to `0` and a 3-minute auto-start countdown scheduled in-memory.
+
+### 2. Join Wheel
+- **Input**: `POST /api/wheel/join` with `{ "user_id": 2 }` (assuming user has enough coins).
+- **Expected Result**: HTTP `200 OK`, coin deduction from the user's wallet, pool updates split correctly according to `pool_config` (70% Winner, 20% Admin, 10% App), a recorded transaction line, and a `user_joined` event emitted to all Socket.IO clients.
+
+### 3. Start Wheel
+- **Input**: `POST /api/wheel/start` with `{ "admin_id": 1 }` (while wheel status is `waiting` and participants ≥ 3).
+- **Expected Result**: HTTP `200 OK`, status changes to `active`, auto-start timer is cancelled, and `wheel_started` event broadcasted immediately, followed by the elimination rounds.
+
+### 4. Less Than 3 Participants
+- **Input**: 3 minutes pass with only 1 or 2 participants, or admin attempts to start manually with less than 3 participants.
+- **Expected Result**: Wheel automatically transitions to `aborted`, entry fees are fully refunded to joined players' wallets, transactions are stored for refunds, and a `wheel_aborted` socket event is broadcasted.
+
+### 5. Winner Selection
+- **Input**: Elimination round completes with 1 remaining user out of initial participants.
+- **Expected Result**: Sole remaining player is declared the winner, wheel status transitions to `completed`, winner receives the entire accumulated `winner_pool`, payout transactions are committed, and the `winner_declared` socket event is broadcasted.
+
+### 6. Admin Payout
+- **Input**: Wheel completes successfully and moves to `completed`.
+- **Expected Result**: The `admin_pool` (20% of accumulated entry fees) is deposited to the system admin's user account, an `admin_payout` transaction is recorded, and the payout amount is included in the final `winner_declared` Socket.IO payload.
+
+---
+
+## Edge Cases Handled
+
+The service layer is built defensively to handle the following edge cases:
+
+- **Duplicate Joins**: Prevented at database level via a unique constraint on `participants(wheel_id, user_id)` and checked in the service inside a transaction.
+- **Insufficient Coins**: Handled by locking the user's balance with `FOR UPDATE` and checking if `coins >= ENTRY_FEE`. Returns a `402 Payment Required` HTTP response.
+- **Multiple Active Wheel Creation Attempts**: Creating a wheel checks if any wheel already has a status of `waiting` or `active`. Rejects with a `400 Bad Request` if one exists.
+- **Concurrent Joins**: Prevented from causing double-spends or incorrect pool balances using PostgreSQL explicit row locks (`FOR UPDATE` on both `users` and `spin_wheels`).
+- **Missing user_id / admin_id**: Checked at the controller level; rejects requests lacking identifying IDs with a `400 Bad Request`.
+- **Less Than 3 Participants**: Safely transitions status to `aborted` and initiates a multi-row transaction-backed refund loop.
+- **Manual Start while Active**: If the wheel is already in `active`, `completed`, or `aborted` status, manual start requests are rejected immediately.
+- **Auto-Start Timer Cancellation**: Starting the wheel manually clears the internal Node.js timeout block (`clearTimeout(autoStartTimer)`) to avoid double-firing.
+
+---
+
+## Performance Considerations
+
+- **PostgreSQL Transactions**: Database mutations (join wheel, declare winner, abort wheel) use structured `BEGIN`, `COMMIT`, and `ROLLBACK` blocks to maintain strict ACID properties.
+- **Row-Level Locking**: High-concurrency operations lock the user wallet using `SELECT ... FOR UPDATE` to avoid race conditions.
+- **Socket.IO Real-time Communication**: Minimises poll request overhead by broadcasting only critical lightweight change updates (`user_joined`, `user_eliminated`, etc.) to clients in real-time.
+- **Database Indexing**: The `participants` and `transactions` tables use indexes on foreign keys (`wheel_id`, `user_id`) to maintain sub-millisecond query performance as records grow.
+- **Service-Layer Architecture**: Keeps core calculations, database locks, and socket communications fully decoupled from the routing and network transport layer for simple code maintainability and testing.
 
 ---
 
