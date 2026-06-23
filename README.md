@@ -46,16 +46,16 @@ The Spin Wheel Multiplayer Game System lets players join a shared spin-wheel ses
 ## Architecture Diagram
 
 ```
-Client (Postman / Frontend)
-          |
-          v
-Node.js + Express API
-          |
-          v
-Business Logic Layer (wheelService.js)
-          |
-          v
-PostgreSQL Database <---> Socket.IO Events
+Client (Postman / Frontend / Socket Client)
+                   │
+                   ▼
+         Node.js + Express API
+                   │
+                   ▼
+     Business Logic Layer (wheelService.js)
+         /                   \
+        ▼                     ▼
+PostgreSQL Database     Socket.IO Events
 ```
 
 ---
@@ -209,7 +209,6 @@ docker exec -it postgres-db psql -U admin -d spinwheel -f /schema.sql
 ### Step 3 – Install Dependencies
 
 ```bash
-cd spin-wheel-game
 npm install
 ```
 
@@ -258,7 +257,7 @@ Create a new spin wheel. Only one wheel can be waiting/active at a time.
 {
   "success": true,
   "message": "Spin wheel created successfully. Auto-start in 3 minutes.",
-  "data": { "id": 1, "status": "waiting", "winner_pool": 0, ... }
+  "data": { "id": 1, "status": "waiting", "winner_pool": 0, "admin_pool": 0, "app_pool": 0 }
 }
 ```
 
@@ -277,7 +276,7 @@ Join the currently open wheel by paying the entry fee.
 {
   "success": true,
   "message": "Successfully joined wheel #1",
-  "data": { "wheel": { ... }, "participant": { ... }, "entryFee": 100 }
+  "data": { "wheel": { "id": 1, "status": "waiting", "winner_pool": 70, "admin_pool": 20, "app_pool": 10 }, "participant": { "id": 1, "wheel_id": 1, "user_id": 2 }, "entryFee": 100 }
 }
 ```
 
@@ -295,7 +294,7 @@ Manually start the waiting wheel (admin only). Cancels the auto-start timer.
 
 **Response `200`:**
 ```json
-{ "success": true, "message": "Wheel #1 started manually" }
+{ "success": true, "message": "Wheel #1 started manually", "data": { "message": "Wheel #1 started manually", "wheelId": 1 } }
 ```
 
 ---
@@ -308,7 +307,7 @@ Returns the current waiting or active wheel and its participant list.
 {
   "success": true,
   "data": {
-    "wheel": { "id": 1, "status": "active", "winner_pool": 350, ... },
+    "wheel": { "id": 1, "status": "active", "winner_pool": 210, "admin_pool": 60, "app_pool": 30, "participant_count": "3" },
     "participants": [ { "id": 2, "name": "Alice", "joined_at": "..." }, ... ]
   }
 }
@@ -324,7 +323,7 @@ Returns the most recently completed or aborted wheel.
 {
   "success": true,
   "data": {
-    "result": { "id": 1, "status": "completed", "winner_id": 3, "winner_name": "Charlie", ... }
+    "result": { "id": 1, "status": "completed", "winner_id": 3, "winner_name": "Bob", "winner_pool": 210, "admin_pool": 60, "app_pool": 30 }
   }
 }
 ```
@@ -341,7 +340,7 @@ List all users with their current coin balances.
 {
   "success": true,
   "data": [
-    { "id": 1, "name": "Admin",   "coins": 10000, "is_admin": true },
+    { "id": 1, "name": "Admin",   "coins": 10060, "is_admin": true },
     { "id": 2, "name": "Alice",   "coins": 900,   "is_admin": false },
     ...
   ]
@@ -360,7 +359,7 @@ Create a test user.
 
 **Response `201`:**
 ```json
-{ "success": true, "message": "User created successfully", "data": { "id": 7, ... } }
+{ "success": true, "message": "User created successfully", "data": { "id": 7, "name": "Frank", "coins": 500, "is_admin": false } }
 ```
 
 ---
@@ -463,7 +462,8 @@ The service layer is built defensively to handle the following edge cases:
 
 - **Duplicate Joins**: Prevented at database level via a unique constraint on `participants(wheel_id, user_id)` and checked in the service inside a transaction.
 - **Insufficient Coins**: Handled by locking the user's balance with `FOR UPDATE` and checking if `coins >= ENTRY_FEE`. Returns a `402 Payment Required` HTTP response.
-- **Multiple Active Wheel Creation Attempts**: Creating a wheel checks if any wheel already has a status of `waiting` or `active`. Rejects with a `400 Bad Request` if one exists.
+- **Multiple Active Wheel Creation Attempts**: Creating a wheel checks if any wheel already has a status of `waiting` or `active`. Rejects with a `400 Bad Request` and throws:
+  `A wheel is already active or waiting. Only one wheel can exist at a time.`
 - **Concurrent Joins**: Prevented from causing double-spends or incorrect pool balances using PostgreSQL explicit row locks (`FOR UPDATE` on both `users` and `spin_wheels`).
 - **Missing user_id / admin_id**: Checked at the controller level; rejects requests lacking identifying IDs with a `400 Bad Request`.
 - **Less Than 3 Participants**: Safely transitions status to `aborted` and initiates a multi-row transaction-backed refund loop.
