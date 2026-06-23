@@ -132,31 +132,6 @@ docker compose down
 
 ---
 
-### Alternative Docker Run (Manual Setup)
-
-If you prefer manual command-line setup, run the following PostgreSQL container with the required credentials:
-
-```bash
-docker run --name postgres-db \
-  -e POSTGRES_USER=admin \
-  -e POSTGRES_PASSWORD=admin123 \
-  -e POSTGRES_DB=spinwheel \
-  -p 5432:5432 \
-  -d postgres
-```
-
-> **Windows (PowerShell) Alternative**:
-> ```powershell
-> docker run --name postgres-db `
->   -e POSTGRES_USER=admin `
->   -e POSTGRES_PASSWORD=admin123 `
->   -e POSTGRES_DB=spinwheel `
->   -p 5432:5432 `
->   -d postgres
-> ```
-
----
-
 ## Database Schema
 
 ### Tables
