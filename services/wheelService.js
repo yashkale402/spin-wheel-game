@@ -57,7 +57,8 @@ const createWheel = async (adminId) => {
         "SELECT id FROM spin_wheels WHERE status IN ('waiting','active') LIMIT 1"
     );
     if (activeRes.rows.length) {
-        throw new Error(`A wheel is already active or waiting. ${activeRes.rows[0].status}. Only one wheel can be active at a time.`);
+        throw new Error(
+  "A wheel is already active or waiting. Only one wheel can exist at a time.");
     }
 
     // Insert the new wheel
